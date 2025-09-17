@@ -60,7 +60,7 @@ function App() {
     addTranscriptMessage,
     addTranscriptBreadcrumb,
   } = useTranscript();
-  const { logClientEvent, logServerEvent } = useEvent();
+  const { logClientEvent, logServerEvent, logUsageCost } = useEvent();
 
   const [selectedAgentName, setSelectedAgentName] = useState<string>("");
   const [selectedAgentConfigSet, setSelectedAgentConfigSet] = useState<
@@ -215,7 +215,7 @@ function App() {
         const companyName = agentSetKey === 'customerServiceRetail'
           ? customerServiceRetailCompanyName
           : chatSupervisorCompanyName;
-        const guardrail = createModerationGuardrail(companyName);
+        const guardrail = createModerationGuardrail(companyName, logUsageCost);
 
         await connect({
           getEphemeralKey: async () => EPHEMERAL_KEY,
@@ -224,6 +224,7 @@ function App() {
           outputGuardrails: [guardrail],
           extraContext: {
             addTranscriptBreadcrumb,
+            logUsageCost,
           },
         });
       } catch (err) {

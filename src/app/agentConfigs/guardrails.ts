@@ -1,5 +1,6 @@
 import { zodTextFormat } from 'openai/helpers/zod';
-import { GuardrailOutputZod, GuardrailOutput } from '@/app/types';
+import { GuardrailOutputZod, GuardrailOutput, UsageCostLogger } from '@/app/types';
+import { normalizeUsage } from '@/app/lib/cost';
 
 // Validator that calls the /api/responses endpoint to
 // validates the realtime output according to moderation policies. 
@@ -8,6 +9,7 @@ import { GuardrailOutputZod, GuardrailOutput } from '@/app/types';
 export async function runGuardrailClassifier(
   message: string,
   companyName: string = 'newTelco',
+  logUsageCost?: UsageCostLogger,
 ): Promise<GuardrailOutput> {
   const messages = [
     {
@@ -53,6 +55,20 @@ export async function runGuardrailClassifier(
 
   const data = await response.json();
 
+  if (logUsageCost && data?.usage) {
+    logUsageCost({
+      model: 'gpt-4o-mini',
+      source: 'guardrail',
+      usage: data.usage,
+      metadata: {
+        guardrail: 'moderation_guardrail',
+        companyName,
+        responseId: data.id,
+        usageNormalized: normalizeUsage(data.usage),
+      },
+    });
+  }
+
   try {
     const output = GuardrailOutputZod.parse(data.output_parsed);
     return {
@@ -77,13 +93,16 @@ export interface RealtimeOutputGuardrailArgs {
 }
 
 // Creates a guardrail bound to a specific company name for output moderation purposes. 
-export function createModerationGuardrail(companyName: string) {
+export function createModerationGuardrail(
+  companyName: string,
+  logUsageCost?: UsageCostLogger,
+) {
   return {
     name: 'moderation_guardrail',
 
     async execute({ agentOutput }: RealtimeOutputGuardrailArgs): Promise<RealtimeOutputGuardrailResult> {
       try {
-        const res = await runGuardrailClassifier(agentOutput, companyName);
+        const res = await runGuardrailClassifier(agentOutput, companyName, logUsageCost);
         const triggered = res.moderationCategory !== 'NONE';
         return {
           tripwireTriggered: triggered,
