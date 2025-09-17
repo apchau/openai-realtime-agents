@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CostBreakdown, TokenUsage } from "@/app/lib/cost";
 
 // Define the allowed moderation categories only once
 export const MODERATION_CATEGORIES = [
@@ -146,3 +147,16 @@ export const GuardrailOutputZod = z.object({
 });
 
 export type GuardrailOutput = z.infer<typeof GuardrailOutputZod>;
+
+export type UsageDeltaPayload = Partial<TokenUsage> | Record<string, any> | null | undefined;
+
+export interface UsageLogPayload {
+  model: string;
+  source: "realtime" | "responses" | "guardrail" | string;
+  usage: UsageDeltaPayload;
+  metadata?: Record<string, any>;
+}
+
+export type UsageCostTotals = TokenUsage & CostBreakdown;
+
+export type UsageCostLogger = (payload: UsageLogPayload) => void;

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useEffect } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
   RealtimeSession,
   RealtimeAgent,
@@ -9,6 +9,7 @@ import { audioFormatForCodec, applyCodecPreferences } from '../lib/codecUtils';
 import { useEvent } from '../contexts/EventContext';
 import { useHandleSessionHistory } from './useHandleSessionHistory';
 import { SessionStatus } from '../types';
+import { normalizeUsage } from '../lib/cost';
 
 export interface RealtimeSessionCallbacks {
   onConnectionChange?: (status: SessionStatus) => void;
@@ -23,12 +24,14 @@ export interface ConnectOptions {
   outputGuardrails?: any[];
 }
 
+const REALTIME_MODEL = 'gpt-4o-realtime-preview-2025-06-03';
+
 export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
   const sessionRef = useRef<RealtimeSession | null>(null);
   const [status, setStatus] = useState<
     SessionStatus
   >('DISCONNECTED');
-  const { logClientEvent } = useEvent();
+  const { logClientEvent, logServerEvent, logUsageCost } = useEvent();
 
   const updateStatus = useCallback(
     (s: SessionStatus) => {
@@ -36,34 +39,36 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       callbacks.onConnectionChange?.(s);
       logClientEvent({}, s);
     },
-    [callbacks],
+    [callbacks, logClientEvent],
   );
 
-  const { logServerEvent } = useEvent();
+  const historyHandlersRef = useHandleSessionHistory();
 
-  const historyHandlers = useHandleSessionHistory().current;
-
-  function handleTransportEvent(event: any) {
+  const handleTransportEvent = useCallback(
+    (event: any) => {
+      const historyHandlers = historyHandlersRef.current;
     // Handle additional server events that aren't managed by the session
-    switch (event.type) {
-      case "conversation.item.input_audio_transcription.completed": {
-        historyHandlers.handleTranscriptionCompleted(event);
-        break;
+      switch (event.type) {
+        case "conversation.item.input_audio_transcription.completed": {
+          historyHandlers.handleTranscriptionCompleted(event);
+          break;
+        }
+        case "response.audio_transcript.done": {
+          historyHandlers.handleTranscriptionCompleted(event);
+          break;
+        }
+        case "response.audio_transcript.delta": {
+          historyHandlers.handleTranscriptionDelta(event);
+          break;
+        }
+        default: {
+          logServerEvent(event);
+          break;
+        }
       }
-      case "response.audio_transcript.done": {
-        historyHandlers.handleTranscriptionCompleted(event);
-        break;
-      }
-      case "response.audio_transcript.delta": {
-        historyHandlers.handleTranscriptionDelta(event);
-        break;
-      }
-      default: {
-        logServerEvent(event);
-        break;
-      } 
-    }
-  }
+    },
+    [historyHandlersRef, logServerEvent],
+  );
 
   const codecParamRef = useRef<string>(
     (typeof window !== 'undefined'
@@ -78,35 +83,15 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     [],
   );
 
-  const handleAgentHandoff = (item: any) => {
-    const history = item.context.history;
-    const lastMessage = history[history.length - 1];
-    const agentName = lastMessage.name.split("transfer_to_")[1];
-    callbacks.onAgentHandoff?.(agentName);
-  };
-
-  useEffect(() => {
-    if (sessionRef.current) {
-      // Log server errors
-      sessionRef.current.on("error", (...args: any[]) => {
-        logServerEvent({
-          type: "error",
-          message: args[0],
-        });
-      });
-
-      // history events
-      sessionRef.current.on("agent_handoff", handleAgentHandoff);
-      sessionRef.current.on("agent_tool_start", historyHandlers.handleAgentToolStart);
-      sessionRef.current.on("agent_tool_end", historyHandlers.handleAgentToolEnd);
-      sessionRef.current.on("history_updated", historyHandlers.handleHistoryUpdated);
-      sessionRef.current.on("history_added", historyHandlers.handleHistoryAdded);
-      sessionRef.current.on("guardrail_tripped", historyHandlers.handleGuardrailTripped);
-
-      // additional transport events
-      sessionRef.current.on("transport_event", handleTransportEvent);
-    }
-  }, [sessionRef.current]);
+  const handleAgentHandoff = useCallback(
+    (item: any) => {
+      const history = item.context.history;
+      const lastMessage = history[history.length - 1];
+      const agentName = lastMessage.name.split("transfer_to_")[1];
+      callbacks.onAgentHandoff?.(agentName);
+    },
+    [callbacks],
+  );
 
   const connect = useCallback(
     async ({
@@ -137,7 +122,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
             return pc;
           },
         }),
-        model: 'gpt-4o-realtime-preview-2025-06-03',
+        model: REALTIME_MODEL,
         config: {
           inputAudioFormat: audioFormat,
           outputAudioFormat: audioFormat,
@@ -149,10 +134,39 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         context: extraContext ?? {},
       });
 
+      const session = sessionRef.current;
+      const historyHandlers = historyHandlersRef.current;
+
+      session.on("error", (...args: any[]) => {
+        logServerEvent({
+          type: "error",
+          message: args[0],
+        });
+      });
+
+      session.on("agent_handoff", handleAgentHandoff);
+      session.on("agent_tool_start", historyHandlers.handleAgentToolStart);
+      session.on("agent_tool_end", historyHandlers.handleAgentToolEnd);
+      session.on("history_updated", historyHandlers.handleHistoryUpdated);
+      session.on("history_added", historyHandlers.handleHistoryAdded);
+      session.on("guardrail_tripped", historyHandlers.handleGuardrailTripped);
+      session.on("transport_event", handleTransportEvent);
+      session.on("usage_update", (usage) => {
+        logUsageCost({
+          model: REALTIME_MODEL,
+          source: "realtime",
+          usage,
+          metadata: {
+            requests: usage.requests,
+            sessionTotals: normalizeUsage(session.usage),
+          },
+        });
+      });
+
       await sessionRef.current.connect({ apiKey: ek });
       updateStatus('CONNECTED');
     },
-    [callbacks, updateStatus],
+    [applyCodec, callbacks, handleAgentHandoff, handleTransportEvent, historyHandlersRef, logServerEvent, logUsageCost, updateStatus],
   );
 
   const disconnect = useCallback(() => {

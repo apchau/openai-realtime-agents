@@ -1,4 +1,6 @@
 import { RealtimeItem, tool } from '@openai/agents/realtime';
+import type { UsageCostLogger } from '@/app/types';
+import { normalizeUsage } from '@/app/lib/cost';
 
 
 import {
@@ -147,7 +149,14 @@ export const supervisorAgentTools = [
   },
 ];
 
-async function fetchResponsesMessage(body: any) {
+interface FetchResponseOptions {
+  logUsageCost?: UsageCostLogger;
+  source?: string;
+  metadata?: Record<string, any>;
+}
+
+async function fetchResponsesMessage(body: any, options: FetchResponseOptions = {}) {
+  const { logUsageCost, source = 'responses', metadata } = options;
   const response = await fetch('/api/responses', {
     method: 'POST',
     headers: {
@@ -163,6 +172,20 @@ async function fetchResponsesMessage(body: any) {
   }
 
   const completion = await response.json();
+
+  if (logUsageCost && completion?.usage) {
+    logUsageCost({
+      model: body.model,
+      source,
+      usage: completion.usage,
+      metadata: {
+        ...(metadata ?? {}),
+        responseId: completion.id,
+        usageNormalized: normalizeUsage(completion.usage),
+      },
+    });
+  }
+
   return completion;
 }
 
@@ -187,6 +210,7 @@ async function handleToolCalls(
   body: any,
   response: any,
   addBreadcrumb?: (title: string, data?: any) => void,
+  logUsageCost?: UsageCostLogger,
 ) {
   let currentResponse = response;
 
@@ -249,7 +273,14 @@ async function handleToolCalls(
     }
 
     // Make the follow-up request including the tool outputs.
-    currentResponse = await fetchResponsesMessage(body);
+    currentResponse = await fetchResponsesMessage(body, {
+      logUsageCost,
+      source: 'responses.supervisor.follow_up',
+      metadata: {
+        phase: 'follow_up',
+        lastToolCall: toolCall.name,
+      },
+    });
   }
 }
 
@@ -303,12 +334,20 @@ export const getNextResponseFromSupervisor = tool({
       tools: supervisorAgentTools,
     };
 
-    const response = await fetchResponsesMessage(body);
+    const logUsageCost = (details?.context as any)?.logUsageCost as
+      | UsageCostLogger
+      | undefined;
+
+    const response = await fetchResponsesMessage(body, {
+      logUsageCost,
+      source: 'responses.supervisor.initial',
+      metadata: { phase: 'initial' },
+    });
     if (response.error) {
       return { error: 'Something went wrong.' };
     }
 
-    const finalText = await handleToolCalls(body, response, addBreadcrumb);
+    const finalText = await handleToolCalls(body, response, addBreadcrumb, logUsageCost);
     if ((finalText as any)?.error) {
       return { error: 'Something went wrong.' };
     }
